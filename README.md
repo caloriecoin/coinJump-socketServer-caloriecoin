@@ -13,9 +13,11 @@
   }
   ```
  - jumping (socket)
+#### Request Data(NONE)
 
 ### emit
  - LOADING_GAME
+#### Response Data (NONE)
  - START_GAME
  #### Response Data
   ```javascript
