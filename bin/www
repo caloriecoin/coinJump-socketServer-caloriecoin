@@ -1,0 +1,261 @@
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+
+var app = require("../app");
+var debug = require("debug")("battlesocketserver:server");
+var http = require("http");
+var axios = require("axios");
+const { ifError } = require("assert");
+
+/**
+ * Get port from environment and store in Express.
+ */
+
+var port = normalizePort(process.env.PORT || "3000");
+app.set("port", port);
+
+console.log("listen to port >> ", port);
+
+/**
+ * Create HTTP server.
+ */
+
+var server = http.createServer(app);
+
+/**
+ * Listen on provided port, on all network interfaces.
+ */
+
+var listenServer = server.listen(port);
+server.on("error", onError);
+server.on("listening", onListening);
+
+var io = require("socket.io")(listenServer);
+
+// game global status
+const playerQueue = [];
+const gameTime = 1000 * 30;
+let isGameStart = false;
+
+// 게임 방 데이터 (현재는 급하기 때문에 고정으로 지정, 추후 Redis 사용하여 수정) 현재는 플레이어 2명만 게임 가능
+let player1;
+let player2;
+let player1_jump = 0;
+let player2_jump = 0;
+
+// socket.io connection check
+io.on("connection", function (socket) {
+  console.log(`${socket.id} 님이 접속했습니다 !!`);
+
+  // socket.on("disconnect", (reason) => {
+  //   console.log(`${socket.id} Disconnect >> `, reason);
+  //   socket.broadcast.emit("msg", `${socket.id}님이 접속 해제 하였습니다.`);
+  // });
+
+  socket.on("disconnect", (reason) => {
+    console.log(`${socket.id} Disconnect >> `, reason);
+    socket.broadcast.emit("msg", `${socket.id}님이 접속 해제 하였습니다.`);
+  });
+
+  socket.on("enterQueue", (data) => {
+    if (data) {
+      console.log(`사용자 ${data.nickname}(${data.gender}) 이/가 배틀 큐에 참여했습니다.`);
+      playerQueue.push({ socket: socket, nickname: data.nickname, gender: data.gender, id: data.id });
+    }
+  });
+
+  socket.on("jumping", (data) => {
+    if (socket.id === player1.socket.id) {
+      if(data && data > 0) player1_jump = player1_jump + data;
+      else player1_jump++;
+    } else {
+      if(data && data > 0) player2_jump = player2_jump + data;
+      else player2_jump++;
+    }
+  });
+});
+
+setInterval(async() => {
+  console.log("Player Queue Count => ", playerQueue.length);
+  if (!isGameStart) {
+    if (playerQueue.length >= 2) {
+      // create new game !
+      let count = 0;
+
+      isGameStart = true;
+
+      player1 = playerQueue.shift();
+      player2 = playerQueue.shift();
+
+      console.log(
+        `player1 : ${player1.nickname} / player2 : ${player2.nickname} game start !!`
+      );
+
+      const player1ECDID = encodeURI(player1.id);
+      const player2ECDID = encodeURI(player2.id);
+      
+
+      const response = await axios.post(`https://caloriecoin.herokuapp.com/api/battleJump/createBattleJumpOnStart/${player1ECDID}/${player2ECDID}`);
+
+      if(response.data)
+      {
+        const roomId = response.data.battleJump._id;
+
+        // 각각의 플레이어에게 6초의 대기시간 표시
+        player1.socket.emit("LOADING_GAME", {
+          nickname: player2.nickname,
+          gender: player2.gender
+        });
+
+        player2.socket.emit("LOADING_GAME", {
+          nickname: player1.nickname,
+          gender: player1.gender
+        });
+
+        setTimeout(() => {
+          // 각각의 플레이어에게 게임 시작 알림 전송
+          player1.socket.emit("START_GAME");
+          player2.socket.emit("START_GAME");
+
+          var gameTimer = setInterval(async() => {
+            // 10 ms 마다 각자의 게임 상태를 각자에게 전달 함
+            player1.socket.emit("GAME_STATUS", {
+              myJump: player1_jump,
+              targetJump: player2_jump,
+              lefttime: gameTime - count * 10 <= 0 ? 0 : gameTime - count * 10,
+            });
+
+            player2.socket.emit("GAME_STATUS", {
+              myJump: player2_jump,
+              targetJump: player1_jump,
+              lefttime: gameTime - count * 10 <= 0 ? 0 : gameTime - count * 10,
+            });
+
+            // 만약 게임 시간이 끝났다면 각자 게임 시간에 대해 알려주고 해당 게임을 종료 한다.
+            if (count * 10 >= gameTime) {
+              axios.put(`https://caloriecoin.herokuapp.com/api/battleJump/judgeBattleJumpOnEnd/${roomId}`, {
+                  player1_jumps: player1_jump,
+                  player2_jumps: player2_jump,
+                });
+                
+              if (player1_jump > player2_jump) {
+                // 플레이어 1의 승리
+                player1.socket.emit("END_GAME", {
+                  winner: player1.nickname,
+                  loser: player2.nickname,
+                  myScore: player1_jump,
+                  targetScore: player2_jump,
+                  draw: false,
+                });
+
+                player2.socket.emit("END_GAME", {
+                  winner: player1.nickname,
+                  loser: player2.nickname,
+                  myScore: player2_jump,
+                  targetScore: player1_jump,
+                  draw: false,
+                });
+              } else if (player1_jump < player2_jump) {
+                player1.socket.emit("END_GAME", {
+                  winner: player2.nickname,
+                  loser: player1.nickname,
+                  myScore: player1_jump,
+                  targetScore: player2_jump,
+                  draw: false,
+                });
+
+                player2.socket.emit("END_GAME", {
+                  winner: player2.nickname,
+                  loser: player1.nickname,
+                  myScore: player2_jump,
+                  targetScore: player1_jump,
+                  draw: false,
+                });
+              } else {
+                player1.socket.emit("END_GAME", {
+                  myScore: player1_jump,
+                  targetScore: player2_jump,
+                  draw: true,
+                });
+
+                player2.socket.emit("END_GAME", {
+                  myScore: player2_jump,
+                  targetScore: player1_jump,
+                  draw: true,
+                });
+              }
+
+              // init
+              isGameStart = false;
+              player1_jump = 0;
+              player2_jump = 0;
+
+              clearInterval(gameTimer);
+              gameTimer = null;
+            }
+            count++;
+          }, 10);
+        }, 5000); 
+      }
+    }
+  }
+}, 1000);
+
+/**
+ * Normalize a port into a number, string, or false.
+ */
+
+function normalizePort(val) {
+  var port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // named pipe
+    return val;
+  }
+
+  if (port >= 0) {
+    // port number
+    return port;
+  }
+
+  return false;
+}
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+  if (error.syscall !== "listen") {
+    throw error;
+  }
+
+  var bind = typeof port === "string" ? "Pipe " + port : "Port " + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case "EACCES":
+      console.error(bind + " requires elevated privileges");
+      process.exit(1);
+      break;
+    case "EADDRINUSE":
+      console.error(bind + " is already in use");
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+  var addr = server.address();
+  var bind = typeof addr === "string" ? "pipe " + addr : "port " + addr.port;
+  debug("Listening on " + bind);
+}
